@@ -1,0 +1,211 @@
+
+## ***************** Initialization # basis  ***************
+units                        metal
+dimension                      3
+boundary                    p  p  p
+atom_style                    atomic
+atom_modify                map      hash
+
+# ****************** read data  *****************
+
+read_data                    tx_3.data
+
+# mass
+# *******************  Define a few parameters  ********************** 
+
+variable              T        equal  322                        
+variable              DT     equal     0.0005                    
+variable              T_low    equal  302                           
+variable              T_hight  equal  342                         
+
+# *********************  Potential  function setting *****************
+
+pair_style hybrid/overlay sw lj/cut 12.0
+pair_coeff * * sw t-ptse2.sw Pt Se1 Se2  Pt Se1 Se2 Pt Se1 Se2 Pt Se1 Se2 Pt Se1 Se2
+
+pair_coeff * * lj/cut 0 0
+
+pair_coeff 2 6 lj/cut 0.0187 3.59
+pair_coeff 5 9 lj/cut 0.0187 3.59
+pair_coeff 8 12 lj/cut 0.0187 3.59
+pair_coeff 11 15 lj/cut 0.0187 3.59
+
+
+## *********************** > Initialization relaxation < ***********************
+## ***********************  Static equilibrium  **************************
+## *********************  thermo output  ************************
+
+neighbor          1      bin
+neigh_modify      delay  10   every  1  check yes    
+
+#  *************************  The second step  **********************
+#  *************************  Set velocity at 300K  **********************
+
+reset_timestep                   0                                                                 
+velocity             all  create  300  80427  mom  yes  rot  yes  dist  gaussian  units box       
+
+
+#  *************************  The following to  divide  block ***********************
+
+variable         P            equal     4.00000                                 
+variable         P1           equal     70.0000
+
+variable         tmp1         equal     ${P1}-${P}
+variable         tmp          equal     ${tmp1}/60
+
+variable         bath        equal     4
+
+variable         L1           equal     ${P}+${bath}
+variable         R1           equal     ${P1}-${bath}
+
+variable        L2            equal      ${L1}+5*${tmp}
+variable        R2            equal     ${R1}-5*${tmp}
+
+region           lfixed     block         INF      INF          INF          ${P}       INF          INF    units box
+region           rfixed     block         INF      INF       ${P1}       INF         INF          INF    units box
+
+region           hot        block       INF        INF          ${P}       ${L1}       INF          INF    units box
+region           cold       block       INF        INF       ${R1}       ${P1}       INF          INF    units box
+
+region           left        block       INF        INF          ${L1}       ${L2}       INF          INF    units box
+region           right       block       INF        INF       ${R2}       ${R1}       INF          INF    units box
+
+region           main       block       INF        INF        ${P}       ${P1}       INF          INF    units box
+
+region           fixed      union     2     lfixed    rfixed
+
+## *****************  Frozen atomic group  **************         
+                    
+group            freeze      region       fixed
+
+# *********************** Other Group ************************* 
+
+group            lfixed      region       lfixed
+group            rfixed      region       rfixed
+
+group            main        region       main
+
+group            hot         region       hot
+group            cold        region       cold
+
+group         left    region     left
+group         right    region     right
+##*****************  Divide the zone into blocks for extracting the temperature blocks  *****************
+variable         average_30       equal           (${P1}-${P})/30
+
+# ****************  The 1nd equilibration run  ********************
+
+fix       2     all     nve
+fix       1     all     langevin     ${T}    ${T}    0.05 50893  zero yes tally yes            
+
+
+dump               1      all      custom   200000   dump.optimize   id   type   x   y   z 
+dump_modify        1      sort id
+        
+thermo_style custom step temp  pe etotal press vol  
+thermo	           1000
+
+## Set the time_step
+
+timestep                    ${DT}
+
+run		                  1000000
+
+undump                    1
+unfix                     1
+unfix                     2
+
+change_box 	all		boundary	p  f  p
+velocity         freeze    set       0.0   0.0   0.0
+fix             wall         freeze     setforce 0 0 0
+#  ************************ The second stage  **********************
+#  ************************ The 2nd equilibration run  **********************
+#  ************************ Write  a  shell  script  to  generate velocity random number  *******************
+
+variable	random_seed		equal	100*${DT}
+
+
+compute          Thot      hot        temp/region        hot
+compute          Tcold      cold       temp/region        cold
+compute          Fixtemp    freeze     temp/region        fixed
+variable           tdiff    equal   c_Thot-c_Tcold       
+
+fix                2       main          nve
+fix                Hot     hot       langevin    ${T_hight}  ${T_hight}     ${random_seed}   54321  zero yes tally yes
+fix                Cold    cold    langevin    ${T_low}    ${T_low}       ${random_seed}   12345   zero yes tally yes 
+fix_modify      Hot  temp  Thot
+fix_modify      Cold temp  Tcold
+
+dump               1      all       custom   500000   dump.heatrelaxation   id   type   x   y   z   
+dump_modify        1      sort  id
+
+dump               2      main      custom   500000   dump.main   id   type   x   y   z   
+dump_modify        2      sort  id
+
+dump               3      hot       custom   500000   dump.hot    id   type   x   y   z   
+dump_modify        3      sort  id
+
+dump               4      cold      custom   500000   dump.cold   id   type   x   y   z   
+dump_modify        4      sort  id
+
+
+thermo_style       custom   step    temp   lx   ly   lz   c_Thot   c_Tcold   c_Fixtemp   f_Hot   f_Cold   v_tdiff   etotal 
+thermo_modify      lost     warn   flush   yes
+thermo	           1000
+
+run                2000000 
+
+unfix              2
+unfix              Hot
+unfix              Cold
+undump             1
+undump             2
+undump             3
+undump             4
+
+
+# **************************** The third stage  ************************
+# **************************** Reset langevin thermostats to zero energy accumulation ******************
+# **************************** Thermal conductivity (NEMD) calculation ************************
+# **************************** Reset time step *************************
+
+reset_timestep             0
+
+# Reset langevin thermostats
+fix  NVE   main   nve
+fix                Hot     hot       langevin    ${T_hight}  ${T_hight}      ${random_seed}    54321 zero yes tally yes
+fix                Cold    cold    langevin      ${T_low}     ${T_low}         ${random_seed}     12345 zero yes tally yes
+fix_modify      Hot  temp  Thot
+fix_modify      Cold temp  Tcold
+
+fix             ave all ave/time 10 100 1000 v_tdiff ave running
+thermo_style       custom   step   temp   lx   ly   lz   c_Thot   c_Tcold   c_Fixtemp   f_Hot   f_Cold   v_tdiff     f_ave
+thermo_modify      lost     warn   flush   yes
+
+compute	          ALLKe      all     ke/atom       
+variable          KB         equal   8.625e-5                    
+variable          temp       atom    c_ALLKe/1.5/${KB} 
+
+fix                hot1        hot         ave/time    10   100   1000    f_Hot     file    hot.txt
+fix                cold1       cold        ave/time    10   100   1000    f_Cold    file    cold.txt
+
+compute            BLOCKSZ_30        main    chunk/atom  bin/1d    y   lower     3     units     box
+
+fix                T_PROFILEZ_30     main   ave/chunk   1   5000000  5000000    BLOCKSZ_30        v_temp    file   temp_30.txt
+
+## *********************  Run enough time ***********************
+
+restart             10000000      thermal.*.restart
+
+run                 10000000
+
+unfix		hot1
+unfix		cold1 
+
+dump          ncold     right     custom   1  ncold.gr    id   type   vx  vy  vz
+dump_modify   ncold     sort   id
+
+dump         nhot     left    custom    1   nhot.gr   id   type   vx  vy  vz
+dump_modify    nhot   sort   id
+
+run         20000
