@@ -1,0 +1,129 @@
+#
+units             metal  #时间单位 ps，能量单位eV
+dimension         3
+newton            on 
+boundary          f  p  p
+atom_style        atomic
+neighbor          2.0 nsq
+
+read_data         PtSe2_3layer.data
+#replicate         1 1 2              #将模型沿着方向复制，扩大模型，这是在z方向将模型放大两倍
+
+#---------------------------------------------------------------------------- 势函数（起始）---------------------------------------------------------------------------------------------------------#
+#pair_style lcbop 
+#angle_style harmonic
+#bond_style harmonic 
+#dihedral_style harmonic
+#improper_style harmonic
+#special_bonds lj 0.0 0.0 0.5 coul 0.0 0.0 1.0 angle yes dihedral yes
+#dielectric  1.5
+#kspace_style pppm 1.0e-4
+
+#——————————————————pair coeff——————————————————————
+pair_style hybrid/overlay sw lj/cut 12.0
+pair_coeff * * sw t-ptse2.sw  Se1 Se2 Pt Se1 Se2 Pt Se1 Se2  Pt
+
+pair_coeff * * lj/cut 0 0
+
+pair_coeff 1 5 lj/cut 0.0187 3.59
+pair_coeff 4 8 lj/cut 0.0187 3.59
+
+
+
+#---------------------------------------------------------------------------- 势函数（终止）---------------------------------------------------------------------------------------------------------#
+
+timestep   0.0005 #时间步长0.5fs，按自己模拟需要设置，一般是0.0005-0.001
+
+#------------------------------------------边界固定（wall）------------------------------------------------------------------#
+region  left   block INF 3 INF INF INF INF units box           #z方向负无穷到1.433固定（左边界）
+region  right  block 125 INF INF INF INF INF units box       #z方向73.433到正无穷固定（右边界）
+region            wall  union  2  left right units box                      #将左边界和右边界合并在一起，统称为wall
+group             wall  region wall                                                 #将wall分到wall组
+group mobile subtract all wall                                                  #用所有的原子（all）减去固定的原子（wall）剩下的原子分到了mobile组（可以移动的原子）
+ 
+group Pt type 10
+group Se1 type 20
+group Se2 type 30
+group m union Pt Se1 Se2
+#----------上面是我将我需要的特定的原子进行分组，后续需要计算某些原子之间的相互作用能或VDOS都需要用到组---------------------------------------------------#
+
+neighbor	0.3 bin
+neigh_modify every 1 delay 0 check yes
+
+#------------能量最小化，一般不用进行更改---------------
+dump 1 all custom 1000 dump1.lammpstrj id type x y z #第一次原子轨迹输出，观察能量最小化、控温后的模型
+#minimize 1.0e-12 1.0e-12 1000 1000  
+#min_style cg 
+#minimize 1.0e-8 1.0e-8 1000 50000 
+velocity mobile create 300 34567 rot yes mom yes dist gaussian units box
+
+#--------------NPT(300K)（一般不需要改，根据所需温度可以改第二行的两个300）---------------
+fix    wall   wall  setforce 0.0 0.0 0.0 
+fix 1 mobile nvt temp 300 300 0.05
+compute	new mobile temp 
+fix_modify 1   temp new
+thermo_style custom step temp  pe etotal press vol  
+thermo_modify  temp new
+thermo 1000
+run  500000 
+unfix 1
+write_data  Pt.data
+#-----------设置冷热源（一般不需要改）---------#
+region hot  block  3 14 INF INF INF INF units box  
+region cold block  114 125 INF INF INF INF units box 
+group hot  region hot 
+group cold region cold
+compute Thot  hot  temp/region hot
+compute Tcold cold temp/region cold
+#--------------NVE(300K)（一般不需要改，这里的温度是根据冷热端温度的平均值决定的，需要改的化改冷热端温度即可）---------------
+fix    2   mobile   nve
+fix hot   hot   langevin 320 320  0.05 59803 tally yes
+fix cold  cold  langevin 280 280  0.05 59803 tally yes
+fix_modify      hot  temp  Thot
+fix_modify      cold temp  Tcold
+variable Tdiff equal c_Thot-c_Tcold
+thermo_style custom step temp press vol  c_Thot c_Tcold f_hot f_cold v_Tdiff  #输出的参数，可根据需要自己进行添加或删减
+thermo 1000
+run 500000
+unfix 2 
+unfix hot 
+unfix cold
+undump 1 #停止第一次原子轨迹输出，观察能量最小化、控温后的模型
+reset_timestep 0 #开始计算后需要将步数归0，否则它会带上能量最小化的步数（算vdos时需要归0，否则vdos处理代码无法剔除能量最小化的步数，输不出vdos）
+
+#--------------真正计算的部分（热导率或界面热阻）--NVE(300K)（一般不需要改，这里的温度是根据冷热端温度的平均值决定的，需要改的化改冷热端温度即可）---------------#
+dump 2 all custom 10000 dump2.lammpstrj id type x y z 
+fix NVE   mobile   nve
+fix hot   hot   langevin 320 320  0.05 59803 tally yes
+fix cold  cold  langevin 280 280  0.05 59803 tally yes
+fix_modify      hot  temp  Thot
+fix_modify      cold temp  Tcold
+
+fix             ave all ave/time 10 100 1000 v_Tdiff ave running
+thermo_style    custom step temp c_Thot c_Tcold f_hot f_cold v_Tdiff f_ave
+compute    ke  mobile  ke/atom #单原子动能
+variable   temp atom  c_ke*1.6e+4/(1.5*1.38)  #单原子温度
+compute cc1 mobile chunk/atom bin/1d x lower 4  #用NEMD算温度时需要对计算区域进行分层，我这是沿着z轴方向分层，每层2埃
+fix temp_profile mobile ave/chunk 1 5000000 5000000 cc1 v_temp file temp.profile  #输出温度文件
+fix 4 mobile ave/time 10 100 1000     f_cold f_hot file heat1000.data  #输出热流文件
+run 10000000
+#-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+#-------------------------计算相互作用能------------------------------------------#
+#compute inter m group/group csi                                                           #计算m与csi之间的相互作用能
+#fix inter1 all ave/time 10 100 1000 c_inter file inter-sic-ery-300K.data  #输出m与csi之间的相互作用能（一般不用改）
+#-------------------------计算相互作用能------------------------------------------#
+
+#-------------------------计算csi的vdos------------------------------------------#
+dump vdos1 mobile custom 1 vdos_3layer_1.lammpstrj id type vx vy vz                          #输出csi的vdos文件，其中10就是取样间隔s（处理代码里需要根据自己的in文件修改的参数）
+dump_modify vdos1 sort id
+#-------------------------计算csi的vdos------------------------------------------#
+run 20000 #计算相互作用能和vdos时的总步数
+undump vdos1
+
+#-------------------------计算csi的vdos------------------------------------------#
+dump vdos2 all custom 1 vdos_5layer_2.lammpstrj id type vx vy vz
+dump_modify vdos2 sort id
+#-------------------------计算csi的vdos------------------------------------------#
+run 20000
+#write_restart langevin.restart

@@ -1,0 +1,109 @@
+#
+units             metal  
+dimension         3
+newton            on 
+boundary         f  p  p
+atom_style        atomic
+neighbor          2.0 nsq
+
+read_data         PtSe2_5layer.data
+
+
+#¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ªpair coeff¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª¡ª
+pair_style hybrid/overlay sw lj/cut 12.0
+pair_coeff * * sw t-ptse2.sw  Se1 Se2 Pt Se1 Se2 Pt Se1 Se2  Pt Se1 Se2  Pt Se1 Se2  Pt
+
+pair_coeff * * lj/cut 0 0
+
+pair_coeff 1 5 lj/cut 0.0187 3.59
+pair_coeff 4 8 lj/cut 0.0187 3.59
+pair_coeff 7 11 lj/cut 0.0187 3.59
+pair_coeff 10 14 lj/cut 0.0187 3.59
+#-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+timestep   0.0005
+#------------------------------------------£¨wall£©------------------------------------------------------------------#
+region  left   block INF 3 INF INF INF INF units box          
+region  right  block 125 INF INF INF INF INF units box       
+region            wall  union  2  left right units box                      
+group             wall  region wall                                                 
+group mobile subtract all wall                                                  
+ 
+#-------------------------------------------------------------#
+
+neighbor	0.3 bin
+neigh_modify every 1 delay 0 check yes
+
+#---------------------------
+dump 1 all custom 1000 dump1.lammpstrj id type x y z
+#minimize 1.0e-12 1.0e-12 1000 1000  
+#min_style cg 
+#minimize 1.0e-8 1.0e-8 1000 50000 
+velocity mobile create 300 34567 rot yes mom yes dist gaussian units box
+#--------------NPT(372K)---------------
+fix    wall   wall  setforce 0.0 0.0 0.0 
+fix 1 mobile nvt temp 372 372 0.05
+compute	new mobile temp 
+fix_modify 1   temp new
+thermo_style custom step temp  pe etotal press vol  
+thermo_modify  temp new
+thermo 1000
+run  500000 
+unfix 1
+write_data  Pt.data
+
+#--------------------#
+region hot  block  3 14 INF INF INF INF units box  
+region cold block  114 125 INF INF INF INF units box 
+group hot  region hot 
+group cold region cold
+compute Thot  hot  temp/region hot
+compute Tcold cold temp/region cold
+
+#--------------NVE(372K)---------------
+fix    2   mobile   nve
+fix hot   hot   langevin 392 392  0.05 59803 tally yes
+fix cold  cold  langevin 352 352  0.05 59803 tally yes
+fix_modify      hot  temp  Thot
+fix_modify      cold temp  Tcold
+variable Tdiff equal c_Thot-c_Tcold
+thermo_style custom step temp press vol  c_Thot c_Tcold f_hot f_cold v_Tdiff  
+thermo 1000
+run 500000
+unfix 2 
+unfix hot 
+unfix cold
+undump 1 
+reset_timestep 0
+
+#----------------NVE(372K)---------------#
+dump 2 all custom 10000 dump2.lammpstrj id type x y z 
+fix NVE   mobile   nve
+fix hot   hot   langevin 392 392  0.05 59803 tally yes
+fix cold  cold  langevin 352 352  0.05 59803 tally yes
+fix_modify      hot  temp  Thot
+fix_modify      cold temp  Tcold
+
+fix             ave all ave/time 10 100 1000 v_Tdiff ave running
+thermo_style    custom step temp c_Thot c_Tcold f_hot f_cold v_Tdiff f_ave
+compute    ke  mobile  ke/atom 
+variable   temp atom  c_ke*1.6e+4/(1.5*1.38)  
+compute cc1 mobile chunk/atom bin/1d x lower 4 
+fix temp_profile mobile ave/chunk 1 5000000 5000000 cc1 v_temp file temp.profile 
+fix 4 mobile ave/time 10 100 1000     f_cold f_hot file heat1000.data  
+run 10000000
+#-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+#------------------------vdos------------------------------------------#
+dump vdos1 mobile custom 1 vdos_5layer_1.lammpstrj id type vx vy vz                          
+dump_modify vdos1 sort id
+
+run 20000 
+undump vdos1
+
+#-------------------------------------------------------------------#
+dump vdos2 all custom 1 vdos_5layer_2.lammpstrj id type vx vy vz
+dump_modify vdos2 sort id
+
+run 20000
+#write_restart langevin.restart
